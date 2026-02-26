@@ -1,0 +1,13 @@
+{
+    "domain": "pid_convector_thermostat",
+    "name": "PID Convector Thermostat",
+    "codeowners": [
+        "@TomaszLizer"
+    ],
+    "dependencies": [],
+    "documentation": "https://github.com/TomaszLizer/pid-convector-thermostat",
+    "iot_class": "local_push",
+    "issue_tracker": "https://github.com/TomaszLizer/pid-convector-thermostat/issues",
+    "requirements": [],
+    "version": "0.1.0"
+}

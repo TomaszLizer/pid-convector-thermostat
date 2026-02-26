@@ -1,0 +1,56 @@
+set_pid_gain:
+  name: Set PID Gains
+  description: Set PID controller gains (kp, ki, kd, ke) without restarting Home Assistant.
+  target:
+    entity:
+      domain: climate
+      integration: pid_convector_thermostat
+  fields:
+    kp:
+      name: Proportional gain (Kp)
+      description: Proportional coefficient for PID controller.
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 1000
+          step: 0.01
+          mode: box
+    ki:
+      name: Integral gain (Ki)
+      description: Integral coefficient for PID controller.
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 0.001
+          mode: box
+    kd:
+      name: Derivative gain (Kd)
+      description: Derivative coefficient for PID controller.
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 10000
+          step: 0.1
+          mode: box
+    ke:
+      name: External temp gain (Ke)
+      description: Outdoor temperature compensation coefficient.
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 10
+          step: 0.01
+          mode: box
+
+clear_integral:
+  name: Clear PID Integral
+  description: Reset the integral part of the PID controller to zero.
+  target:
+    entity:
+      domain: climate
+      integration: pid_convector_thermostat
