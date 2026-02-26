@@ -674,7 +674,7 @@ class PidConvectorThermostat(ClimateEntity, RestoreEntity, ABC):
                 _LOGGER.warning("%s: Sensor stall detected, setting safety output %s",
                                 self.entity_id, self._output_safety)
                 self._control_output = self._output_safety
-            elif calc_pid or self._sampling_period > 0:
+            else:
                 await self._calc_pid_output()
 
             # Apply dead-zone mapping
@@ -690,22 +690,9 @@ class PidConvectorThermostat(ClimateEntity, RestoreEntity, ABC):
         if self._current_temp is None or self._target_temp is None:
             return
 
-        if self._previous_temp_time is None:
-            self._previous_temp_time = time.time()
-        if self._cur_temp_time is None:
-            self._cur_temp_time = time.time()
-        if self._previous_temp_time > self._cur_temp_time:
-            self._previous_temp_time = self._cur_temp_time
-
-        if self._pid_controller.sampling_period == 0:
-            output, update = self._pid_controller.calc(
-                self._current_temp, self._target_temp,
-                self._cur_temp_time, self._previous_temp_time,
-                self._ext_temp)
-        else:
-            output, update = self._pid_controller.calc(
-                self._current_temp, self._target_temp,
-                ext_temp=self._ext_temp)
+        output, update = self._pid_controller.calc(
+            self._current_temp, self._target_temp,
+            ext_temp=self._ext_temp)
 
         self._control_output = round(output, 1)
         self._p = round(self._pid_controller.proportional, 2)

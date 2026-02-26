@@ -146,36 +146,29 @@ class PID:
         self._last_input = None
         self._last_input_time = None
 
-    def calc(self, input_val, set_point, input_time=None, last_input_time=None, ext_temp=None):
+    def calc(self, input_val, set_point, ext_temp=None):
         """Compute PID output.
 
         Args:
             input_val (float): The current temperature.
             set_point (float): The target temperature.
-            input_time (float): Timestamp of current reading (seconds).
-            last_input_time (float): Timestamp of previous reading (seconds).
             ext_temp (float): Outdoor temperature for compensation.
 
         Returns:
             Tuple of (output, updated): output clamped between out_min and out_max,
             and boolean indicating if a new value was computed.
         """
-        if self._sampling_period != 0 and self._last_input_time is not None and \
-                time() - self._input_time < self._sampling_period:
+        now = time()
+        if self._sampling_period != 0 and self._input_time is not None and \
+                now - self._input_time < self._sampling_period:
             return self._output, False
 
         self._last_input = self._input
-        if self._sampling_period == 0:
-            self._last_input_time = last_input_time
-        else:
-            self._last_input_time = self._input_time
+        self._last_input_time = self._input_time
         self._last_output = self._output
 
         self._input = input_val
-        if self._sampling_period == 0:
-            self._input_time = input_time
-        else:
-            self._input_time = time()
+        self._input_time = now
         self._last_set_point = self._set_point
         self._set_point = set_point
 
