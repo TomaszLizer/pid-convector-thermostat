@@ -4,11 +4,13 @@
 
 A Home Assistant custom component for PID-controlled VDC fan convectors (trench heaters, fan coil units). Purpose-built for variable-speed fan heating systems that require:
 
-- **Dead-zone fan control** — fan shuts off completely below a configurable threshold (no motor stall at low speeds)
+- **Dead-zone fan control with hysteresis** — fan shuts off completely below a configurable threshold, with separate on/off thresholds to prevent oscillation
+- **Minimum output floor** — motor safety: fan never runs below a configurable minimum speed
 - **Soft start/ramp rate** — gradual fan speed changes to reduce mechanical stress and noise
 - **Anti-cycling deadband** — prevents rapid on/off switching
 - **Pause signals** — instantly stops fans when windows open or boiler is off
 - **PID with outdoor compensation** — accurate temperature control with weather-aware tuning
+- **Proper derivative on keep-alive** — derivative term holds between sensor updates instead of collapsing to zero
 
 ## Why this component?
 
@@ -16,12 +18,14 @@ Standard HA thermostat components (generic_thermostat, smart_thermostat) don't h
 
 | Problem | This Component's Solution |
 |---|---|
-| Fan motor stalls at very low speeds (e.g., <15%) | **Dead zone**: output below threshold → fan OFF (0%), above → runs at that speed |
+| Fan motor stalls at very low speeds (e.g., <15%) | **Dead zone with hysteresis**: output below threshold -> fan OFF, with separate on/off thresholds to prevent oscillation at boundary |
+| Fan runs too slow even above dead zone | **Output min**: configurable minimum fan speed floor (e.g., 10%) for motor safety |
 | PID output stuck at minimum overheats room | Dead zone allows PID to naturally request 0% through the dead zone |
 | Rapid on/off cycling damages motors | **Anti-cycling deadband**: configurable minimum on/off durations |
 | Abrupt speed changes are noisy | **Ramp rate**: gradual speed transitions (configurable %/second) |
 | Open window + running fan = wasted energy | **Pause signals**: instant fan stop on window open, smooth resume on close |
 | Boiler cycling causes unnecessary fan operation | **Pause signals**: generic pause input for boiler state, etc. |
+| Derivative term disappears between sensor updates | **Separate timing**: derivative uses sensor-change intervals, integral uses calc intervals |
 
 ## Installation
 
@@ -58,14 +62,15 @@ climate:
     ki: 0.01
     kd: 300
     ke: 0.5
-    dead_zone: 20          # PID output below 20% → fan OFF
+    dead_zone: 15          # PID output below 15% -> fan OFF (with hysteresis: OFF below 9%)
+    output_min: 10         # Fan never runs below 10% (motor safety)
     output_max: 70         # Maximum fan speed in auto mode
     night_max: 40          # Maximum fan speed in night mode
     min_on_duration: 30    # Minimum seconds fan stays ON
     min_off_duration: 30   # Minimum seconds fan stays OFF
     ramp_rate: 20          # Maximum speed change: 20%/second
     keep_alive:
-      seconds: 60
+      seconds: 10
     debug: true
     preset_speeds:         # Optional, defaults shown
       low: 25
@@ -96,7 +101,8 @@ climate:
 
 | Parameter | Default | Description |
 |---|---|---|
-| `dead_zone` | 20 | PID output below this (%) → fan OFF. At or above → fan runs at that speed |
+| `dead_zone` | 20 | PID output below this (%) -> fan OFF. Uses hysteresis: ON at `dead_zone`, OFF at `dead_zone * 0.6` |
+| `output_min` | 0 | Minimum fan speed (%) when running. Non-zero output is clamped to `[output_min, 100]` for motor safety |
 | `output_max` | 70 | Maximum fan speed (%) in `auto` preset |
 | `night_max` | 40 | Maximum fan speed (%) in `night` preset |
 | `preset_speeds` | `{low: 25, medium: 45, high: 65}` | Fixed speeds for manual presets |
@@ -159,15 +165,25 @@ Presets change dynamically based on HVAC mode:
 
 ## Dead Zone Behavior
 
+The dead zone uses **hysteresis** to prevent oscillation at the boundary. With the default hysteresis factor of 0.6:
+
+- **Turn ON threshold**: PID output >= `dead_zone` (e.g., 15%)
+- **Turn OFF threshold**: PID output < `dead_zone * 0.6` (e.g., 9%)
+- **Between thresholds**: fan maintains its current state
+
 ```
-PID Output:    0%  ···  19%  |  20%  ···  70%
-                             |
-Fan Speed:     0%   0%   0%  |  20%  ···  70%
-                    ↑        |   ↑
-              dead zone      | minimum safe speed
+Example: dead_zone: 15, output_min: 10
+
+PID Output:    0%  ···  8%  |  9-14%  |  15%  ···  70%
+                            |         |
+Fan OFF:       0%   0%  0%  |  hold   |
+Fan ON:                     |  hold   |  15%  ···  70%  (clamped to >= output_min)
+                    ↑       | hyster. |   ↑
+              below OFF     |  band   | above ON threshold
+              threshold     |         |
 ```
 
-The PID operates in range [0, output_max]. When its output falls below `dead_zone`, the fan turns **completely off** (light.turn_off). When output rises above `dead_zone`, the fan starts at that speed — already above the minimum safe motor speed.
+When `output_min` is set (e.g., 10), any non-zero fan speed is clamped to at least that value, ensuring the motor never runs at dangerously low speeds.
 
 ## Pause Behavior
 
@@ -213,11 +229,15 @@ When `debug: true`, the following attributes are exposed:
 | `pid_i` | Integral component |
 | `pid_d` | Derivative component |
 | `pid_e` | External (outdoor) compensation component |
-| `pid_dt` | Time delta between last two PID calculations |
+| `pid_dt` | Time since last PID calculation (integral interval) |
+| `pid_deriv_dt` | Time since last actual sensor change (derivative interval) |
+| `pid_tick` | PID calculation counter (for verifying keep-alive is firing) |
 | `control_output` | Raw PID output (before dead zone) |
 | `target_output` | Desired fan speed (after dead zone) |
 | `actual_output` | Current fan speed (after ramp) |
 | `dead_zone_active` | True when PID wants heating but output is in dead zone |
+| `dead_zone_on_threshold` | The dead zone ON threshold value |
+| `dead_zone_off_threshold` | The dead zone OFF threshold value (dead_zone * 0.6) |
 | `paused` | True when paused by window/signal |
 | `pause_reason` | Reason for pause (window_open, pause_signal) |
 | `fan_is_on` | Current fan on/off state |
