@@ -82,8 +82,8 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         vol.Optional(const.CONF_NIGHT_MAX, default=const.DEFAULT_NIGHT_MAX): vol.Coerce(float),
         vol.Optional(const.CONF_PRESET_SPEEDS, default={}): PRESET_SPEEDS_SCHEMA,
         vol.Required(const.CONF_KEEP_ALIVE): vol.All(cv.time_period, cv.positive_timedelta),
-        vol.Optional(const.CONF_SAMPLING_PERIOD, default=const.DEFAULT_SAMPLING_PERIOD): vol.All(
-            cv.time_period, cv.positive_timedelta),
+        vol.Optional(const.CONF_SAMPLING_PERIOD, default=const.DEFAULT_SAMPLING_PERIOD):
+            cv.time_period,
         vol.Optional(const.CONF_SENSOR_STALL, default=const.DEFAULT_SENSOR_STALL): vol.All(
             cv.time_period, cv.positive_timedelta),
         vol.Optional(const.CONF_OUTPUT_SAFETY, default=const.DEFAULT_OUTPUT_SAFETY): vol.Coerce(float),
@@ -231,7 +231,7 @@ class PidConvectorThermostat(ClimateEntity, RestoreEntity, ABC):
         self._temp_lock = asyncio.Lock()
 
         # PID state
-        self._p = self._i = self._d = self._e = self._dt = 0.0
+        self._p = self._i = self._d = self._e = self._dt = self._deriv_dt = 0.0
         self._control_output = 0.0  # PID target output
         self._actual_output = 0.0   # Current fan speed (after ramp)
         self._target_output = 0.0   # Desired fan speed (after dead-zone)
@@ -369,7 +369,7 @@ class PidConvectorThermostat(ClimateEntity, RestoreEntity, ABC):
         if self._target_temp is not None:
             self._pid_controller.seed_setpoint(self._target_temp)
 
-        await self._async_control_heating(calc_pid=True)
+        await self._async_control_heating()
 
     # --- Properties ---
 
@@ -451,6 +451,7 @@ class PidConvectorThermostat(ClimateEntity, RestoreEntity, ABC):
                 "pid_d": round(self._d, 3),
                 "pid_e": round(self._e, 3),
                 "pid_dt": round(self._dt, 2),
+                "pid_deriv_dt": round(self._deriv_dt, 2),
                 "pid_tick": self._pid_tick_count,
                 "control_output": round(self._control_output, 2),
                 "target_output": round(self._target_output, 2),
@@ -497,7 +498,7 @@ class PidConvectorThermostat(ClimateEntity, RestoreEntity, ABC):
                 self._attr_preset_mode = const.PRESET_AUTO
             self._pid_controller.out_max = self._get_current_output_max()
             self._pid_controller.out_min = 0.0
-            await self._async_control_heating(calc_pid=True)
+            await self._async_control_heating()
 
         elif hvac_mode == HVACMode.FAN_ONLY:
             self._hvac_mode = HVACMode.FAN_ONLY
@@ -529,7 +530,7 @@ class PidConvectorThermostat(ClimateEntity, RestoreEntity, ABC):
             return
         self._target_temp = temperature
         if self._hvac_mode == HVACMode.HEAT:
-            await self._async_control_heating(calc_pid=True)
+            await self._async_control_heating()
         self.async_write_ha_state()
 
     async def async_set_preset_mode(self, preset_mode: str):
@@ -547,7 +548,7 @@ class PidConvectorThermostat(ClimateEntity, RestoreEntity, ABC):
             # Update PID output max based on preset
             self._pid_controller.out_max = self._get_current_output_max()
             if preset_mode in PID_PRESETS:
-                await self._async_control_heating(calc_pid=True)
+                await self._async_control_heating()
             else:
                 # Fixed speed presets in heat mode
                 await self._async_apply_fixed_speed()
@@ -565,7 +566,7 @@ class PidConvectorThermostat(ClimateEntity, RestoreEntity, ABC):
                 setattr(self, f'_{param}', float(value))
         self._pid_controller.set_pid_param(self._kp, self._ki, self._kd, self._ke)
         if self._hvac_mode == HVACMode.HEAT and self._attr_preset_mode in PID_PRESETS:
-            await self._async_control_heating(calc_pid=True)
+            await self._async_control_heating()
 
     async def async_clear_integral(self, **kwargs):
         """Clear the integral value."""
@@ -575,7 +576,6 @@ class PidConvectorThermostat(ClimateEntity, RestoreEntity, ABC):
 
     # --- Sensor handlers ---
 
-    @callback
     async def _async_sensor_changed(self, event: Event[EventStateChangedData]):
         """Handle temperature sensor changes."""
         new_state = event.data["new_state"]
@@ -587,10 +587,9 @@ class PidConvectorThermostat(ClimateEntity, RestoreEntity, ABC):
         _LOGGER.debug("%s: Temperature update: %s", self.entity_id, self._current_temp)
 
         if self._hvac_mode == HVACMode.HEAT and self._attr_preset_mode in PID_PRESETS:
-            await self._async_control_heating(calc_pid=True)
+            await self._async_control_heating()
         self.async_write_ha_state()
 
-    @callback
     async def _async_ext_sensor_changed(self, event: Event[EventStateChangedData]):
         """Handle outdoor temperature sensor changes."""
         new_state = event.data["new_state"]
@@ -633,7 +632,6 @@ class PidConvectorThermostat(ClimateEntity, RestoreEntity, ABC):
         self._paused = len(reasons) > 0
         self._pause_reason = ", ".join(reasons) if reasons else None
 
-    @callback
     async def _async_pause_changed(self, event: Event[EventStateChangedData]):
         """Handle window/pause signal changes."""
         new_state = event.data["new_state"]
@@ -656,7 +654,7 @@ class PidConvectorThermostat(ClimateEntity, RestoreEntity, ABC):
             self._previous_temp_time = None
             # Deadband applies on resume — _last_on_off_change is already set
             if self._hvac_mode == HVACMode.HEAT and self._attr_preset_mode in PID_PRESETS:
-                await self._async_control_heating(calc_pid=True)
+                await self._async_control_heating()
             elif self._hvac_mode == HVACMode.FAN_ONLY or self._attr_preset_mode not in PID_PRESETS:
                 await self._async_apply_fixed_speed()
 
@@ -664,9 +662,9 @@ class PidConvectorThermostat(ClimateEntity, RestoreEntity, ABC):
 
     # --- Core control loop ---
 
-    async def _async_control_heating(self, now=None, calc_pid=False):
+    async def _async_control_heating(self, now=None):
         """Run the PID control loop."""
-        is_timer_tick = now is not None and calc_pid is False
+        is_timer_tick = now is not None
         async with self._temp_lock:
             self._pid_tick_count += 1
 
@@ -731,6 +729,7 @@ class PidConvectorThermostat(ClimateEntity, RestoreEntity, ABC):
         self._d = round(self._pid_controller.derivative, 2)
         self._e = round(self._pid_controller.external, 2)
         self._dt = round(self._pid_controller.dt, 2)
+        self._deriv_dt = round(self._pid_controller.deriv_dt, 2)
 
         if update:
             _LOGGER.debug(
@@ -806,7 +805,6 @@ class PidConvectorThermostat(ClimateEntity, RestoreEntity, ABC):
 
     # --- Ramp rate control ---
 
-    @callback
     async def _async_ramp_tick(self, now=None):
         """Periodic ramp tick — gradually move actual output toward target."""
         if self._hvac_mode == HVACMode.OFF:

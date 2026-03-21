@@ -16,8 +16,6 @@ _LOGGER = logging.getLogger(__name__)
 class PID:
     """A proportional-integral-derivative controller with outdoor temperature compensation."""
 
-    error: float
-
     def __init__(self, kp, ki, kd, ke=0, out_min=float('-inf'), out_max=float('+inf'),
                  sampling_period=0, cold_tolerance=0.3, hot_tolerance=0.3):
         """Initialize the PID controller.
@@ -53,13 +51,18 @@ class PID:
         self._last_set_point = 0
         self._set_point = 0
         self._input = None
-        self._input_time = None
         self._last_input = None
-        self._last_input_time = None
+        # Calc timing (for integral dt — every tick counts)
+        self._calc_time = None
+        self._last_calc_time = None
+        # Sensor-change timing (for derivative dt — only real changes)
+        self._input_change_time = None
+        self._last_input_change_time = None
         self._error = 0
         self._input_diff = 0
         self._dext = 0
-        self._dt = 0
+        self._dt = 0           # time since last calc (integral dt)
+        self._deriv_dt = 0     # time since last sensor change (derivative dt)
         self._last_output = 0
         self._output = 0
         self._proportional = 0
@@ -128,6 +131,10 @@ class PID:
     def dt(self):
         return self._dt
 
+    @property
+    def deriv_dt(self):
+        return self._deriv_dt
+
     def set_pid_param(self, kp=None, ki=None, kd=None, ke=None):
         """Set PID parameters."""
         if kp is not None and isinstance(kp, (int, float)):
@@ -142,7 +149,10 @@ class PID:
     def clear_samples(self):
         """Clear the samples values and timestamp to restart PID from clean state."""
         self._input = None
-        self._input_time = None
+        self._calc_time = None
+        self._last_calc_time = None
+        self._input_change_time = None
+        self._last_input_change_time = None
 
     def seed_setpoint(self, set_point):
         """Seed the setpoint so the first calc() doesn't see a spurious change.
@@ -154,7 +164,8 @@ class PID:
         self._set_point = set_point
         self._last_set_point = set_point
         self._last_input = None
-        self._last_input_time = None
+        self._last_calc_time = None
+        self._last_input_change_time = None
 
     def calc(self, input_val, set_point, ext_temp=None):
         """Compute PID output.
@@ -169,16 +180,23 @@ class PID:
             and boolean indicating if a new value was computed.
         """
         now = time()
-        if self._sampling_period != 0 and self._input_time is not None and \
-                now - self._input_time < self._sampling_period:
+        if self._sampling_period != 0 and self._calc_time is not None and \
+                now - self._calc_time < self._sampling_period:
             return self._output, False
 
-        self._last_input = self._input
-        self._last_input_time = self._input_time
-        self._last_output = self._output
+        # Advance calc timing
+        self._last_calc_time = self._calc_time
+        self._calc_time = now
 
-        self._input = input_val
-        self._input_time = now
+        # Detect whether the sensor value actually changed
+        sensor_changed = (self._input is None or input_val != self._input)
+        if sensor_changed:
+            self._last_input = self._input
+            self._last_input_change_time = self._input_change_time
+            self._input = input_val
+            self._input_change_time = now
+
+        self._last_output = self._output
         self._last_set_point = self._set_point
         self._set_point = set_point
 
@@ -194,16 +212,24 @@ class PID:
             else:
                 return self._output, False
 
-        # Compute error variables
+        # Compute error
         self._error = set_point - input_val
-        if self._last_input is not None:
-            self._input_diff = self._input - self._last_input
-        else:
-            self._input_diff = 0
-        if self._last_input_time is not None:
-            self._dt = self._input_time - self._last_input_time
+
+        # Calc dt (for integral — every tick)
+        if self._last_calc_time is not None:
+            self._dt = self._calc_time - self._last_calc_time
         else:
             self._dt = 0
+
+        # Sensor-change dt (for derivative — only real changes)
+        if sensor_changed and self._last_input is not None and \
+                self._last_input_change_time is not None:
+            self._input_diff = self._input - self._last_input
+            self._deriv_dt = self._input_change_time - self._last_input_change_time
+        else:
+            # No new sensor reading: keep derivative from last computation
+            pass
+
         if ext_temp is not None:
             self._dext = set_point - ext_temp
         else:
@@ -224,10 +250,9 @@ class PID:
             self._integral = 0
 
         self._proportional = self._Kp * self._error
-        if self._dt != 0:
-            self._derivative = -(self._Kd * self._input_diff) / self._dt
-        else:
-            self._derivative = 0.0
+        if sensor_changed and self._deriv_dt != 0:
+            self._derivative = -(self._Kd * self._input_diff) / self._deriv_dt
+        # else: hold previous derivative value (already set)
 
         # Compute PID output
         output = self._proportional + self._integral + self._derivative + self._external
