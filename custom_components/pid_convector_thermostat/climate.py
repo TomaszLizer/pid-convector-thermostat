@@ -836,10 +836,20 @@ class PidConvectorThermostat(ClimateEntity, RestoreEntity, ABC):
         else:
             new_output = max(current - max_step, target)
 
-        # Ensure we don't go below dead_zone (unless targeting 0)
+        # Handle intermediate values inside the dead zone range
         if 0 < new_output < self._dead_zone:
             if target == 0:
-                new_output = 0
+                if self._output_min > 0:
+                    # Ramping to off: allow smooth descent through dead zone.
+                    # If we're already at output_min (or below), turn off.
+                    # Otherwise, clamp to output_min for a soft landing.
+                    if current <= self._output_min + 0.5:
+                        new_output = 0
+                    else:
+                        new_output = self._output_min
+                else:
+                    # No output_min configured — let ramp step naturally
+                    pass
             else:
                 new_output = self._dead_zone
 
