@@ -372,10 +372,11 @@ class PidConvectorThermostat(ClimateEntity, RestoreEntity, ABC):
         if not self._hvac_mode:
             self._hvac_mode = HVACMode.OFF
 
-        # Seed the PID setpoint so the first calc() doesn't see a spurious
-        # change from 0 → target_temp, which would reset the restored integral.
+        # Seed the PID state so the first calc() doesn't see a spurious
+        # setpoint change (which would reset the restored integral) and doesn't
+        # produce a derivative spike from a near-zero deriv_dt.
         if self._target_temp is not None:
-            self._pid_controller.seed_setpoint(self._target_temp)
+            self._pid_controller.seed_setpoint(self._target_temp, self._current_temp)
 
         await self._async_control_heating()
 

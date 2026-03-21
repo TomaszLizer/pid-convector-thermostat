@@ -154,17 +154,26 @@ class PID:
         self._input_change_time = None
         self._last_input_change_time = None
 
-    def seed_setpoint(self, set_point):
-        """Seed the setpoint so the first calc() doesn't see a spurious change.
+    def seed_setpoint(self, set_point, input_val=None):
+        """Seed the PID state so the first calc() starts cleanly.
 
-        Must be called after state restore and before the first calc() to prevent
-        the anti-windup logic from treating the restored setpoint as a new change
-        (which would reset the integral).
+        Seeds the setpoint so the anti-windup logic doesn't see a spurious
+        change from 0 -> target_temp (which would reset the integral).
+
+        If input_val is provided, also seeds the input value so the first
+        calc() doesn't treat the startup sensor read as a "change". The
+        input_change_time is left as None so the derivative is suppressed
+        until two real sensor readings have occurred.
+
+        Must be called after state restore and before the first calc().
         """
         self._set_point = set_point
         self._last_set_point = set_point
+        if input_val is not None:
+            self._input = input_val
         self._last_input = None
         self._last_calc_time = None
+        self._input_change_time = None
         self._last_input_change_time = None
 
     def calc(self, input_val, set_point, ext_temp=None):
