@@ -217,7 +217,8 @@ class PidConvectorThermostat(ClimateEntity, RestoreEntity, ABC):
         self._debug = kwargs.get('debug', False)
 
         # HVAC state
-        self._hvac_mode = kwargs.get('initial_hvac_mode') or None
+        self._hvac_mode = None
+        self._initial_hvac_mode = kwargs.get('initial_hvac_mode')  # first-boot fallback only
         self._attr_preset_mode = const.PRESET_AUTO
 
         # Internal state
@@ -353,11 +354,18 @@ class PidConvectorThermostat(ClimateEntity, RestoreEntity, ABC):
                     setattr(self, f'_{attr}', float(val))
             self._pid_controller.set_pid_param(self._kp, self._ki, self._kd, self._ke)
 
-            if not self._hvac_mode and old_state.state:
+            # Always restore HVAC mode from previous state
+            if old_state.state:
                 self._set_hvac_mode_internal(old_state.state)
+                _LOGGER.info("%s: Restored HVAC mode: %s", self.entity_id, self._hvac_mode)
         else:
             if self._target_temp is None:
                 self._target_temp = self._min_temp
+            # First boot: use initial_hvac_mode if configured
+            if self._initial_hvac_mode:
+                self._set_hvac_mode_internal(self._initial_hvac_mode)
+                _LOGGER.info("%s: First boot, using initial_hvac_mode: %s",
+                             self.entity_id, self._hvac_mode)
             _LOGGER.warning("%s: No previous state, target temp set to %s",
                             self.entity_id, self._target_temp)
 
