@@ -37,6 +37,11 @@ DEFAULT_TOLERANCE = 0.3
 # e.g. dead_zone=15 → ON at 15, OFF below 9 (15 * 0.6)
 DEAD_ZONE_HYSTERESIS = 0.6
 
+# Minimum derivative interval (seconds). If two sensor readings arrive
+# closer than this, the derivative uses this floor as the denominator
+# to prevent spikes from sensor jitter or startup replay.
+MIN_DERIV_DT = 2.0
+
 # Config keys
 CONF_HEATER = "heater"
 CONF_SENSOR = "target_sensor"

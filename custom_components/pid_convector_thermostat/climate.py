@@ -232,7 +232,7 @@ class PidConvectorThermostat(ClimateEntity, RestoreEntity, ABC):
         self._temp_lock = asyncio.Lock()
 
         # PID state
-        self._p = self._i = self._d = self._e = self._dt = self._deriv_dt = 0.0
+        self._p = self._i = self._d = self._e = self._dt = 0.0
         self._control_output = 0.0  # PID target output
         self._actual_output = 0.0   # Current fan speed (after ramp)
         self._target_output = 0.0   # Desired fan speed (after dead-zone)
@@ -269,6 +269,7 @@ class PidConvectorThermostat(ClimateEntity, RestoreEntity, ABC):
             self._kp, self._ki, self._kd, self._ke,
             out_min=0.0, out_max=self._output_max,
             sampling_period=self._sampling_period,
+            min_deriv_dt=const.MIN_DERIV_DT,
             cold_tolerance=self._cold_tolerance,
             hot_tolerance=self._hot_tolerance,
         )
@@ -373,8 +374,7 @@ class PidConvectorThermostat(ClimateEntity, RestoreEntity, ABC):
             self._hvac_mode = HVACMode.OFF
 
         # Seed the PID state so the first calc() doesn't see a spurious
-        # setpoint change (which would reset the restored integral) and doesn't
-        # produce a derivative spike from a near-zero deriv_dt.
+        # setpoint change (which would reset the restored integral).
         if self._target_temp is not None:
             self._pid_controller.seed_setpoint(self._target_temp, self._current_temp)
 
@@ -460,7 +460,6 @@ class PidConvectorThermostat(ClimateEntity, RestoreEntity, ABC):
                 "pid_d": round(self._d, 3),
                 "pid_e": round(self._e, 3),
                 "pid_dt": round(self._dt, 2),
-                "pid_deriv_dt": round(self._deriv_dt, 2),
                 "pid_tick": self._pid_tick_count,
                 "control_output": round(self._control_output, 2),
                 "target_output": round(self._target_output, 2),
@@ -738,7 +737,6 @@ class PidConvectorThermostat(ClimateEntity, RestoreEntity, ABC):
         self._d = round(self._pid_controller.derivative, 2)
         self._e = round(self._pid_controller.external, 2)
         self._dt = round(self._pid_controller.dt, 2)
-        self._deriv_dt = round(self._pid_controller.deriv_dt, 2)
 
         if update:
             _LOGGER.debug(

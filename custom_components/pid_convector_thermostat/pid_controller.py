@@ -17,7 +17,7 @@ class PID:
     """A proportional-integral-derivative controller with outdoor temperature compensation."""
 
     def __init__(self, kp, ki, kd, ke=0, out_min=float('-inf'), out_max=float('+inf'),
-                 sampling_period=0, cold_tolerance=0.3, hot_tolerance=0.3):
+                 sampling_period=0, min_deriv_dt=2.0, cold_tolerance=0.3, hot_tolerance=0.3):
         """Initialize the PID controller.
 
         :param kp: Proportional coefficient.
@@ -27,6 +27,8 @@ class PID:
         :param out_min: Lower output limit.
         :param out_max: Upper output limit.
         :param sampling_period: Minimum time between PID calculations in seconds.
+        :param min_deriv_dt: Minimum derivative interval in seconds. Clamps dt
+            to prevent spikes from sensor jitter or startup replay.
         :param cold_tolerance: Temperature below setpoint before action (PID OFF mode).
         :param hot_tolerance: Temperature above setpoint before action (PID OFF mode).
         """
@@ -52,17 +54,12 @@ class PID:
         self._set_point = 0
         self._input = None
         self._last_input = None
-        # Calc timing (for integral dt — every tick counts)
         self._calc_time = None
         self._last_calc_time = None
-        # Sensor-change timing (for derivative dt — only real changes)
-        self._input_change_time = None
-        self._last_input_change_time = None
         self._error = 0
         self._input_diff = 0
         self._dext = 0
-        self._dt = 0           # time since last calc (integral dt)
-        self._deriv_dt = 0     # time since last sensor change (derivative dt)
+        self._dt = 0
         self._last_output = 0
         self._output = 0
         self._proportional = 0
@@ -70,6 +67,7 @@ class PID:
         self._external = 0
         self._mode = 'AUTO'
         self._sampling_period = sampling_period
+        self._min_deriv_dt = min_deriv_dt
         self._cold_tolerance = cold_tolerance
         self._hot_tolerance = hot_tolerance
 
@@ -131,10 +129,6 @@ class PID:
     def dt(self):
         return self._dt
 
-    @property
-    def deriv_dt(self):
-        return self._deriv_dt
-
     def set_pid_param(self, kp=None, ki=None, kd=None, ke=None):
         """Set PID parameters."""
         if kp is not None and isinstance(kp, (int, float)):
@@ -149,10 +143,9 @@ class PID:
     def clear_samples(self):
         """Clear the samples values and timestamp to restart PID from clean state."""
         self._input = None
+        self._last_input = None
         self._calc_time = None
         self._last_calc_time = None
-        self._input_change_time = None
-        self._last_input_change_time = None
 
     def seed_setpoint(self, set_point, input_val=None):
         """Seed the PID state so the first calc() starts cleanly.
@@ -161,9 +154,7 @@ class PID:
         change from 0 -> target_temp (which would reset the integral).
 
         If input_val is provided, also seeds the input value so the first
-        calc() doesn't treat the startup sensor read as a "change". The
-        input_change_time is left as None so the derivative is suppressed
-        until two real sensor readings have occurred.
+        calc() doesn't treat the startup sensor read as a "change".
 
         Must be called after state restore and before the first calc().
         """
@@ -173,11 +164,15 @@ class PID:
             self._input = input_val
         self._last_input = None
         self._last_calc_time = None
-        self._input_change_time = None
-        self._last_input_change_time = None
 
     def calc(self, input_val, set_point, ext_temp=None):
         """Compute PID output.
+
+        Timing: a single timeline (_calc_time / _last_calc_time) is used for
+        both integral dt and derivative dt. The derivative only recomputes when
+        the sensor value actually changes; between changes it holds its previous
+        value. The min_deriv_dt floor prevents spikes when calc() is called in
+        rapid succession (e.g. HA startup event replay).
 
         Args:
             input_val (float): The current temperature.
@@ -193,17 +188,21 @@ class PID:
                 now - self._calc_time < self._sampling_period:
             return self._output, False
 
-        # Advance calc timing
+        # Advance timing
         self._last_calc_time = self._calc_time
         self._calc_time = now
+
+        # Compute dt
+        if self._last_calc_time is not None:
+            self._dt = self._calc_time - self._last_calc_time
+        else:
+            self._dt = 0
 
         # Detect whether the sensor value actually changed
         sensor_changed = (self._input is None or input_val != self._input)
         if sensor_changed:
             self._last_input = self._input
-            self._last_input_change_time = self._input_change_time
             self._input = input_val
-            self._input_change_time = now
 
         self._last_output = self._output
         self._last_set_point = self._set_point
@@ -223,21 +222,6 @@ class PID:
 
         # Compute error
         self._error = set_point - input_val
-
-        # Calc dt (for integral — every tick)
-        if self._last_calc_time is not None:
-            self._dt = self._calc_time - self._last_calc_time
-        else:
-            self._dt = 0
-
-        # Sensor-change dt (for derivative — only real changes)
-        if sensor_changed and self._last_input is not None and \
-                self._last_input_change_time is not None:
-            self._input_diff = self._input - self._last_input
-            self._deriv_dt = self._input_change_time - self._last_input_change_time
-        else:
-            # No new sensor reading: keep derivative from last computation
-            pass
 
         if ext_temp is not None:
             self._dext = set_point - ext_temp
@@ -259,9 +243,15 @@ class PID:
             self._integral = 0
 
         self._proportional = self._Kp * self._error
-        if sensor_changed and self._deriv_dt != 0:
-            self._derivative = -(self._Kd * self._input_diff) / self._deriv_dt
-        # else: hold previous derivative value (already set)
+
+        # Derivative: only recompute when sensor changed AND we have a valid
+        # previous reading. Between changes, hold the previous derivative value.
+        if sensor_changed and self._last_input is not None and self._dt > 0:
+            self._input_diff = self._input - self._last_input
+            # Floor dt to prevent spikes from rapid calc() calls
+            effective_dt = max(self._dt, self._min_deriv_dt)
+            self._derivative = -(self._Kd * self._input_diff) / effective_dt
+        # else: hold previous derivative value
 
         # Compute PID output
         output = self._proportional + self._integral + self._derivative + self._external
