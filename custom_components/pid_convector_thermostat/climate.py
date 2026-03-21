@@ -77,6 +77,7 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         vol.Optional(const.CONF_KD, default=const.DEFAULT_KD): vol.Coerce(float),
         vol.Optional(const.CONF_KE, default=const.DEFAULT_KE): vol.Coerce(float),
         vol.Optional(const.CONF_DEAD_ZONE, default=const.DEFAULT_DEAD_ZONE): vol.Coerce(float),
+        vol.Optional(const.CONF_OUTPUT_MIN, default=const.DEFAULT_OUTPUT_MIN): vol.Coerce(float),
         vol.Optional(const.CONF_OUTPUT_MAX, default=const.DEFAULT_OUTPUT_MAX): vol.Coerce(float),
         vol.Optional(const.CONF_NIGHT_MAX, default=const.DEFAULT_NIGHT_MAX): vol.Coerce(float),
         vol.Optional(const.CONF_PRESET_SPEEDS, default={}): PRESET_SPEEDS_SCHEMA,
@@ -130,6 +131,7 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
         kd=config.get(const.CONF_KD),
         ke=config.get(const.CONF_KE),
         dead_zone=config.get(const.CONF_DEAD_ZONE),
+        output_min=config.get(const.CONF_OUTPUT_MIN),
         output_max=config.get(const.CONF_OUTPUT_MAX),
         night_max=config.get(const.CONF_NIGHT_MAX),
         preset_speeds=preset_speeds,
@@ -195,6 +197,7 @@ class PidConvectorThermostat(ClimateEntity, RestoreEntity, ABC):
 
         # Output configuration
         self._dead_zone = kwargs['dead_zone']
+        self._output_min = kwargs['output_min']
         self._output_max = kwargs['output_max']
         self._night_max = kwargs['night_max']
         self._preset_speeds = {
@@ -236,6 +239,9 @@ class PidConvectorThermostat(ClimateEntity, RestoreEntity, ABC):
         # Anti-cycling state
         self._fan_is_on = False
         self._last_on_off_change = 0.0
+
+        # Debug counters
+        self._pid_tick_count = 0
 
         # Ramp state
         self._ramp_unsub = None
@@ -358,6 +364,11 @@ class PidConvectorThermostat(ClimateEntity, RestoreEntity, ABC):
         if not self._hvac_mode:
             self._hvac_mode = HVACMode.OFF
 
+        # Seed the PID setpoint so the first calc() doesn't see a spurious
+        # change from 0 → target_temp, which would reset the restored integral.
+        if self._target_temp is not None:
+            self._pid_controller.seed_setpoint(self._target_temp)
+
         await self._async_control_heating(calc_pid=True)
 
     # --- Properties ---
@@ -435,15 +446,18 @@ class PidConvectorThermostat(ClimateEntity, RestoreEntity, ABC):
         attrs = {}
         if self._debug:
             attrs.update({
-                "pid_p": round(self._p, 2),
-                "pid_i": round(self._i, 2),
-                "pid_d": round(self._d, 2),
-                "pid_e": round(self._e, 2),
+                "pid_p": round(self._p, 3),
+                "pid_i": round(self._i, 4),
+                "pid_d": round(self._d, 3),
+                "pid_e": round(self._e, 3),
                 "pid_dt": round(self._dt, 2),
-                "control_output": round(self._control_output, 1),
-                "target_output": round(self._target_output, 1),
-                "actual_output": round(self._actual_output, 1),
+                "pid_tick": self._pid_tick_count,
+                "control_output": round(self._control_output, 2),
+                "target_output": round(self._target_output, 2),
+                "actual_output": round(self._actual_output, 2),
                 "dead_zone_active": self._target_output == 0 and self._control_output > 0,
+                "dead_zone_on_threshold": self._dead_zone,
+                "dead_zone_off_threshold": round(self._dead_zone * const.DEAD_ZONE_HYSTERESIS, 1),
                 "paused": self._paused,
                 "pause_reason": self._pause_reason,
                 "fan_is_on": self._fan_is_on,
@@ -652,20 +666,29 @@ class PidConvectorThermostat(ClimateEntity, RestoreEntity, ABC):
 
     async def _async_control_heating(self, now=None, calc_pid=False):
         """Run the PID control loop."""
+        is_timer_tick = now is not None and calc_pid is False
         async with self._temp_lock:
+            self._pid_tick_count += 1
+
             if not self._active and self._current_temp is not None and self._target_temp is not None:
                 self._active = True
                 _LOGGER.info("%s: Activating — temp=%s, target=%s",
                              self.entity_id, self._current_temp, self._target_temp)
 
             if not self._active or self._hvac_mode == HVACMode.OFF:
+                _LOGGER.debug("%s: [tick #%d] Skipping — active=%s, mode=%s",
+                              self.entity_id, self._pid_tick_count,
+                              self._active, self._hvac_mode)
                 return
 
             if self._paused:
+                _LOGGER.debug("%s: [tick #%d] Skipping — paused", self.entity_id, self._pid_tick_count)
                 return
 
             # Fixed speed preset — no PID needed
             if self._attr_preset_mode not in PID_PRESETS:
+                _LOGGER.debug("%s: [tick #%d] Skipping — preset=%s not PID",
+                              self.entity_id, self._pid_tick_count, self._attr_preset_mode)
                 return
 
             # Sensor stall check
@@ -676,6 +699,14 @@ class PidConvectorThermostat(ClimateEntity, RestoreEntity, ABC):
                 self._control_output = self._output_safety
             else:
                 await self._calc_pid_output()
+
+            _LOGGER.debug(
+                "%s: [tick #%d%s] PID: output=%.2f, target=%.2f, actual=%.2f, "
+                "p=%.3f, i=%.4f, d=%.3f, e=%.3f, dt=%.1f",
+                self.entity_id, self._pid_tick_count,
+                " timer" if is_timer_tick else " event",
+                self._control_output, self._target_output, self._actual_output,
+                self._p, self._i, self._d, self._e, self._dt)
 
             # Apply dead-zone mapping
             self._apply_dead_zone()
@@ -709,11 +740,27 @@ class PidConvectorThermostat(ClimateEntity, RestoreEntity, ABC):
                 self._p, self._i, self._d, self._e)
 
     def _apply_dead_zone(self):
-        """Map PID output through dead-zone: below threshold → 0, above → pass through."""
-        if abs(self._control_output) < self._dead_zone:
-            self._target_output = 0.0
+        """Map PID output through dead-zone with hysteresis.
+
+        Turn ON threshold:  control_output >= dead_zone
+        Turn OFF threshold: control_output <  dead_zone * DEAD_ZONE_HYSTERESIS
+        Between the two thresholds, maintain current state.
+        """
+        output_abs = abs(self._control_output)
+        turn_off_threshold = self._dead_zone * const.DEAD_ZONE_HYSTERESIS
+
+        if self._fan_is_on:
+            # Fan is on — only turn off if output drops below lower threshold
+            if output_abs < turn_off_threshold:
+                self._target_output = 0.0
+            else:
+                self._target_output = output_abs
         else:
-            self._target_output = abs(self._control_output)
+            # Fan is off — only turn on if output reaches upper threshold
+            if output_abs >= self._dead_zone:
+                self._target_output = output_abs
+            else:
+                self._target_output = 0.0
 
     def _get_current_output_max(self):
         """Get the output maximum for the current preset."""
@@ -797,8 +844,13 @@ class PidConvectorThermostat(ClimateEntity, RestoreEntity, ABC):
     # --- Fan speed control ---
 
     async def _async_set_fan_speed(self, value: float):
-        """Set fan speed via light brightness. 0 = turn off."""
+        """Set fan speed via light brightness. 0 = off, non-zero clamped to [output_min, 100]."""
         value = round(max(0, value), 1)
+
+        # Enforce minimum output for motor safety: never run below output_min
+        if value > 0 and self._output_min > 0:
+            value = round(max(value, self._output_min), 1)
+
         self._actual_output = value
 
         if value <= 0:

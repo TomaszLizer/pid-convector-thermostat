@@ -12,6 +12,7 @@ DEFAULT_KE = 0.0
 
 # Output defaults
 DEFAULT_DEAD_ZONE = 20.0
+DEFAULT_OUTPUT_MIN = 0.0
 DEFAULT_OUTPUT_MAX = 70.0
 DEFAULT_NIGHT_MAX = 40.0
 
@@ -32,6 +33,10 @@ DEFAULT_RAMP_INTERVAL = 2.0  # seconds between ramp ticks
 # Tolerance defaults
 DEFAULT_TOLERANCE = 0.3
 
+# Dead zone hysteresis: OFF threshold = dead_zone * this factor
+# e.g. dead_zone=15 → ON at 15, OFF below 9 (15 * 0.6)
+DEAD_ZONE_HYSTERESIS = 0.6
+
 # Config keys
 CONF_HEATER = "heater"
 CONF_SENSOR = "target_sensor"
@@ -46,6 +51,7 @@ CONF_KI = "ki"
 CONF_KD = "kd"
 CONF_KE = "ke"
 CONF_DEAD_ZONE = "dead_zone"
+CONF_OUTPUT_MIN = "output_min"
 CONF_OUTPUT_MAX = "output_max"
 CONF_NIGHT_MAX = "night_max"
 CONF_PRESET_SPEEDS = "preset_speeds"

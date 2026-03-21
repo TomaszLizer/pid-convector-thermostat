@@ -143,6 +143,16 @@ class PID:
         """Clear the samples values and timestamp to restart PID from clean state."""
         self._input = None
         self._input_time = None
+
+    def seed_setpoint(self, set_point):
+        """Seed the setpoint so the first calc() doesn't see a spurious change.
+
+        Must be called after state restore and before the first calc() to prevent
+        the anti-windup logic from treating the restored setpoint as a new change
+        (which would reset the integral).
+        """
+        self._set_point = set_point
+        self._last_set_point = set_point
         self._last_input = None
         self._last_input_time = None
 
